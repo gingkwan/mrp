@@ -5,13 +5,27 @@ import sys
 import re
 import nltk
 import json
+import torch
 from nltk.tokenize import word_tokenize
 from nltk.tag import pos_tag
 import subprocess
+from multiprocessing import Pool, cpu_count
 
 # Download required NLTK datasets
 #nltk.download('punkt')
 #nltk.download('averaged_perceptron_tagger')
+
+# Check for MPS availability
+device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+#print(f"Using device: {device}")
+
+# Define valid POS tags (expandable)
+VALID_NOUN_TAGS = {"NN", "NNS", "NNP"}
+VALID_ADJ_TAGS = {"JJ", "VBG"}  # Allow adjectives and gerunds like "nursing", "teaching"
+
+# Dictionary to store summary of processing
+file_summary = {}
+id_counter = 0  # Global counter for entry IDs
 
 # Load the list of professions from `occupation_tags.csv`
 def load_professions():
@@ -33,21 +47,13 @@ def load_professions():
     try:
         df = pd.read_csv("occupation_tags.csv")
         profession_list = set(df.iloc[:, 0])  # Read first column
-        print(f"Loaded {len(profession_list)} profession tags.")
+        #print(f"Loaded {len(profession_list)} profession tags.")
         return profession_list
     except Exception as e:
         print(f"Error loading occupation_tags.csv: {e}")
         return set()
 
 PROFESSIONS = load_professions()
-
-# Define valid POS tags (expandable)
-VALID_NOUN_TAGS = {"NN", "NNS", "NNP"}
-VALID_ADJ_TAGS = {"JJ", "VBG"}  # Allow adjectives and gerunds like "nursing", "teaching"
-
-# Dictionary to store summary of processing
-file_summary = {}
-id_counter = 0  # Global counter for entry IDs
 
 # Function to clean text (lowercase, remove punctuation, numbers)
 def clean_text(text):
@@ -199,13 +205,15 @@ def process_file(file_number, merged_data):
 
     # Clean captions
     print(f"Cleaning captions...")
-    data["caption"] = data["caption"].astype(str).apply(clean_text)
+    
+    # Use parallel processing for cleaning & filtering
+    with Pool(cpu_count()) as pool:
+        data["caption"] = pool.map(clean_text, data["caption"])
+        data["identified_occupations"] = pool.map(extract_professions, data["caption"])
 
-    # Apply Named Entity Recognition (NER) to detect occupation mentions
-    print(f"Filtering occupation-related captions...")
-    data["identified_occupations"] = data["caption"].apply(extract_professions)
     # Remove duplicated entries
     #data["identified_occupations"] = data["identified_occupations"].apply(lambda x: list(set(x)) if x else None)
+    
     filtered_data = data[data["identified_occupations"].notnull()]
 
     # Count each detected profession in the dataset
@@ -287,7 +295,7 @@ if __name__ == "__main__":
     merged_data = pd.DataFrame()  # Initialize an empty DataFrame for merging
 
     # Define the number of files (start from 1)
-    total_files = 1
+    total_files = 2
 
     for file_id in range(total_files):
         print(f"Processing batch {file_id}...")
