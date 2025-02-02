@@ -17,15 +17,13 @@ from multiprocessing import Pool, cpu_count
 
 # Check for MPS availability
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-#print(f"Using device: {device}")
-
-# Define valid POS tags (expandable)
-VALID_NOUN_TAGS = {"NN", "NNS", "NNP"}
-VALID_ADJ_TAGS = {"JJ", "VBG"}  # Allow adjectives and gerunds like "nursing", "teaching"
 
 # Dictionary to store summary of processing
 file_summary = {}
 id_counter = 0  # Global counter for entry IDs
+
+# Global variable to store profession tags
+_profession_cache = None
 
 # Load the list of professions from `occupation_tags.csv`
 def load_professions():
@@ -44,14 +42,16 @@ def load_professions():
     >>> load_professions()
     Loaded 1000 profession tags.
     """
-    try:
-        df = pd.read_csv("occupation_tags.csv")
-        profession_list = set(df.iloc[:, 0])  # Read first column
-        #print(f"Loaded {len(profession_list)} profession tags.")
-        return profession_list
-    except Exception as e:
-        print(f"Error loading occupation_tags.csv: {e}")
-        return set()
+    global _profession_cache
+    if _profession_cache is None:
+        try:
+            df = pd.read_csv("occupation_tags.csv")
+            _profession_cache = set(df.iloc[:, 0])  # Read first column
+            #print(f"Loaded {len(_profession_cache)} profession tags.")
+        except Exception as e:
+            print(f"Error loading occupation_tags.csv: {e}")
+            _profession_cache = set()
+    return _profession_cache
 
 PROFESSIONS = load_professions()
 
@@ -125,6 +125,10 @@ def extract_professions(text):
     >>> extract_professions("John is learning nursing skills.")
     None
     """
+    # Define valid POS tags (expandable)
+    VALID_NOUN_TAGS = {"NN", "NNS", "NNP"}
+    VALID_ADJ_TAGS = {"JJ", "VBG"}  # Allow adjectives and gerunds like "nursing", "teaching"
+        
     text = clean_text(text)  # Ensure text is preprocessed before matching
     words = word_tokenize(text)  # Tokenize words
     tagged_words = pos_tag(words)  # Apply POS tagging
@@ -204,7 +208,7 @@ def process_file(file_number, merged_data):
     data["original_caption"] = data["caption"]
 
     # Clean captions
-    print(f"Cleaning captions...")
+    print(f"Cleaning and filtering captions...")
     
     # Use parallel processing for cleaning & filtering
     with Pool(cpu_count()) as pool:
@@ -292,6 +296,11 @@ def process_file(file_number, merged_data):
 
 # Main execution
 if __name__ == "__main__":
+    if torch.device("mps"):
+        print(f"Using device: {device}")
+
+    PROFESSIONS = load_professions()
+
     merged_data = pd.DataFrame()  # Initialize an empty DataFrame for merging
 
     # Define the number of files (start from 1)
