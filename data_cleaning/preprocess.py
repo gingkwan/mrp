@@ -4,6 +4,7 @@ import os
 import sys
 import re
 import nltk
+import json
 from nltk.tokenize import word_tokenize
 from nltk.tag import pos_tag
 import subprocess
@@ -253,8 +254,10 @@ def process_file(file_number, merged_data):
     # Ensure dimensions match (truncate if needed)
     min_len = min(len(filtered_data), len(img_emb_list), len(text_emb_list))
     filtered_data = filtered_data.iloc[:min_len]
-    filtered_data["image_embedding"] = img_emb_list[:min_len]
-    filtered_data["text_embedding"] = text_emb_list[:min_len]
+
+    # Convert embeddings to JSON strings
+    filtered_data["image_embedding"] = [json.dumps(emb.tolist()) for emb in img_emb[:min_len]]
+    filtered_data["text_embedding"] = [json.dumps(emb.tolist()) for emb in text_emb[:min_len]]
 
     # Add overall entry ID
     filtered_data.insert(0, "id", range(id_counter, id_counter + len(filtered_data)))
@@ -284,7 +287,7 @@ if __name__ == "__main__":
     merged_data = pd.DataFrame()  # Initialize an empty DataFrame for merging
 
     # Define the number of files (start from 1)
-    total_files = 2
+    total_files = 1
 
     for file_id in range(total_files):
         print(f"Processing batch {file_id}...")
