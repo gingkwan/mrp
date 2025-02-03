@@ -212,8 +212,8 @@ def process_file(file_number, merged_data):
     
     # Use parallel processing for cleaning & filtering
     with Pool(cpu_count()) as pool:
-        data["caption"] = pool.map(clean_text, data["caption"])
-        data["identified_occupations"] = pool.map(extract_professions, data["caption"])
+        data["cleaned_caption"] = pool.map(clean_text, data["caption"])
+        data["identified_occupations"] = pool.map(extract_professions, data["cleaned_caption"])
 
     # Remove duplicated entries
     #data["identified_occupations"] = data["identified_occupations"].apply(lambda x: list(set(x)) if x else None)
@@ -275,12 +275,9 @@ def process_file(file_number, merged_data):
     filtered_data.insert(0, "id", range(id_counter, id_counter + len(filtered_data)))
     id_counter += len(filtered_data)  # Update global counter
 
-    # Add file ID as a column
-    filtered_data.insert(1, "file_id", str_i)
-
     # Keep only the required columns
     print(f"Creating filtered dataset...")
-    final_data = filtered_data[["id", "file_id", "entry_id", "original_caption", 
+    final_data = filtered_data[["id", "original_caption", "cleaned_caption",
                                 "identified_occupations", "similarity", "image_embedding", "text_embedding"]]
 
     # Append to global DataFrame
