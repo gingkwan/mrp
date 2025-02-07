@@ -6,6 +6,7 @@ import re
 import nltk
 import json
 import torch
+import time
 from nltk.tokenize import word_tokenize
 from nltk.tag import pos_tag
 import subprocess
@@ -18,9 +19,13 @@ from multiprocessing import Pool, cpu_count
 # Check for MPS availability
 device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
 
-# Dictionary to store summary of processing
-file_summary = {}
+# Initialize variables for processing
 id_counter = 0  # Global counter for entry IDs
+batch_file_number = 0  # Global counter for batch files
+merged_metadata = pd.DataFrame()  # Initialize an empty DataFrame for merging
+merged_text_emb = np.empty((0, 512))  # Initialize empty arrays for embeddings
+merged_img_emb = np.empty((0, 512))
+file_summary = {}  # Initialize file summary dictionary
 
 # Global variable to store profession tags
 _profession_cache = None
@@ -37,11 +42,8 @@ def load_professions():
     1. Reads the `occupation_tags.csv` file
     2. Extracts the profession tags from the first column
     3. Returns the set of profession tags
-
-    Examples:
-    >>> load_professions()
-    Loaded 1000 profession tags.
     """
+    # Use a global variable to cache the profession tags
     global _profession_cache
     if _profession_cache is None:
         try:
@@ -151,168 +153,314 @@ def extract_professions(text):
 
     return list(detected_professions) if detected_professions else None
 
-# Function to download, process, and clean files in a single step
-def process_file(file_number, merged_data):
+def download_batch(file_number):
     """
-    Downloads, processes, and cleans a single batch of metadata and embeddings.
+    Downloads a single batch of data files.
     
     Parameters:
-    file_number (int or str): The batch number/identifier to process
-    merged_data (pandas.DataFrame): The existing merged dataset to append processed data to
-
+    file_number (int): Batch number to download
+    
     Returns:
-    pandas.DataFrame: Updated merged dataset containing the processed batch data
-
-    Global Variables:
-    id_counter (int): Global counter for assigning unique IDs to entries
+    tuple: (metadata, text_emb, img_emb) containing loaded data or None if files are missing
 
     The function:
-    This function handles the complete pipeline for processing a single batch of data:
-    1. Downloads metadata and embedding files
-    2. Cleans and filters captions containing occupation mentions
-    3. Matches embeddings with filtered captions
-    4. Merges the processed data into the main dataset
-
-    Notes:
-    - Requires external files: metadata_{file_number}.parquet, img_emb_{file_number}.npy, 
-      text_emb_{file_number}.npy
-    - Creates temporary files during processing
-    - Updates global file_summary dictionary with batch statistics
-    - Automatically cleans up temporary files after processing
+    1. Downloads metadata, text embeddings and image embeddings for a batch
+    2. Loads the metadata, text embeddings and image embeddings
+    3. Returns the loaded data or None if any files are missing
     """
-    global id_counter  # Ensure global ID is correctly updated across files
-
     str_i = str(file_number)
-    
-    # Download the batch
+
     print(f"Downloading data for batch {str_i}...")
-    subprocess.run(["bash", "./download.sh", str_i])  # Run the download script
-
+    # Download batch data with retry mechanism
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            result = subprocess.run(["bash", "./download.sh", str_i], timeout=300)
+            if result.returncode == 0:
+                break
+        except subprocess.TimeoutExpired:
+            print(f"Attempt {attempt + 1} timed out, retrying...")
+        if attempt == max_retries - 1:
+            print(f"Failed to download batch {str_i} after {max_retries} attempts")
+            return None, None, None
+    
     metadata_file = f"metadata_{str_i}.parquet"
-
     if not os.path.exists(metadata_file):
         print(f"Metadata file {metadata_file} not found. Skipping batch {str_i}.")
-        return merged_data  # Skip if the metadata file is missing
-
+        return None, None, None  # Skip if the metadata file is missing
     # Load metadata
-    data = pd.read_parquet(metadata_file)
-    data["entry_id"] = data.index  # Preserve original row index
+    metadata = pd.read_parquet(metadata_file)
+    
+    text_emb_file = f"text_emb_{str_i}.npy"
+    if not os.path.exists(text_emb_file):
+        print(f"Text embeddings file {text_emb_file} not found. Skipping batch {str_i}.")
+        return None, None, None  # Skip if the metadata file is missing
+    # Load text embeddings
+    text_emb = np.load(text_emb_file)
+    
+    img_emb_file = f"img_emb_{str_i}.npy"
+    if not os.path.exists(img_emb_file):
+        print(f"Image embeddings file {img_emb_file} not found. Skipping batch {str_i}.")
+        return None, None, None  # Skip if the metadata file is missing
+    # Load image embeddings
+    img_emb = np.load(img_emb_file)
+        
+    return metadata, text_emb, img_emb
 
+def filter_captions(data, file_id):
+    """
+    Filters and processes captions to identify occupations.
+
+    Parameters:
+    data (pandas.DataFrame): Input DataFrame containing captions
+    file_id (str): ID of the current file being processed
+
+    Returns:
+    pandas.DataFrame: Filtered DataFrame containing only entries with identified occupations 
+
+    The function:
+    1. Adds entry IDs to the data
+    2. Cleans caption text
+    3. Identifies occupations in captions using parallel processing
+    4. Filters to keep only entries with identified occupations
+    5. Updates file summary with statistics
+    """
+    global file_summary
+    
     # Print processing start message
-    print(f"Preprocessing file {str_i} with {len(data)} entries...")
+    print(f"Preprocessing batch {file_id} with {len(data)} entries...")
+
+    # Preserve original row index
+    data["entry_id"] = data.index
 
     # this small hack is needed becase caption sometimes contains all kind of quotes, from ClickHouse
     data["caption"] = data["caption"].apply(lambda x: x.replace("'", " ").replace('"', " "))
 
     # Preserve original captions before cleaning
     data["original_caption"] = data["caption"]
-
-    # Clean captions
-    print(f"Cleaning and filtering captions...")
     
+    # Print cleaning message
+    print(f"Cleaning and filtering captions...")
+
     # Use parallel processing for cleaning & filtering
     with Pool(cpu_count()) as pool:
         data["cleaned_caption"] = pool.map(clean_text, data["caption"])
         data["identified_occupations"] = pool.map(extract_professions, data["cleaned_caption"])
-
-    # Remove duplicated entries
-    #data["identified_occupations"] = data["identified_occupations"].apply(lambda x: list(set(x)) if x else None)
     
+    # Filter out entries without identified occupations
     filtered_data = data[data["identified_occupations"].notnull()]
-
+    
     # Count each detected profession in the dataset
     profession_count_dict = {}
     for professions in filtered_data["identified_occupations"]:
         for profession in professions:
-            profession_count_dict[profession] = profession_count_dict.get(profession, 0) + 1  # Efficient counting
-
+            profession_count_dict[profession] = profession_count_dict.get(profession, 0) + 1 # Increment count
+    
     # Store summary statistics
-    file_summary[str_i] = {
-        "file_id": str_i,
+    file_summary[file_id] = {
+        "file_id": file_id,
         "total_entries": len(data),
         "occupation_related_entries": len(filtered_data),
-        "professions_count": profession_count_dict  # Counting for multiple professions per caption
+        "professions_count": profession_count_dict
     }
 
-    # Get the original indices of the selected captions
+    # Print filtering result message
+    print(f"Filtered {len(filtered_data)} occupation-related captions from batch {file_id}.")
+    
+    return filtered_data, file_summary
+
+def load_img_emb(args):
+    """
+    Helper function to load image embeddings using parallel processing.
+    """
+    file, indices = args
+    return np.load(file)[indices]
+
+def load_text_emb(args):
+    """
+    Helper function to load text embeddings using parallel processing.
+    """
+    file, indices = args
+    return np.load(file)[indices]
+
+def filter_embeddings(filtered_data, file_number):
+    """
+    Loads and filters embeddings based on filtered captions.
+
+    Parameters:
+    filtered_data (pandas.DataFrame): DataFrame containing filtered caption data
+    file_number (int): Current file number being processed
+
+    Returns:
+    tuple: (final_data, text_emb, img_emb) containing processed data and embeddings
+
+    The function:
+    1. Gets valid indices from filtered data
+    2. Loads and filters embedding files
+    3. Assigns unique IDs to entries
+    4. Returns processed data and embeddings
+    """
+    global id_counter
+    
+    str_i = str(file_number)
+    # Get valid indices from filtered data
     valid_indices = filtered_data["entry_id"].tolist()
-
-    # Remove metadata file after processing
-    os.remove(metadata_file)
-
-    print(f"Filtered {len(filtered_data)} occupation-related captions from file {str_i}.")
-
-    # Load image and text embeddings
-    print(f"Loading image and text embeddings...")
+    
     img_emb_file = f"img_emb_{str_i}.npy"
     text_emb_file = f"text_emb_{str_i}.npy"
-
+    
     if not os.path.exists(img_emb_file) or not os.path.exists(text_emb_file):
         print(f"Missing embedding files for batch {str_i}. Skipping merging step.")
-        return merged_data
-
-    img_emb = np.load(img_emb_file)
-    text_emb = np.load(text_emb_file)
-
-    # Select only embeddings corresponding to filtered captions using valid_indices
-    print(f"Filtering embeddings...")
-    img_emb = img_emb[valid_indices]
-    text_emb = text_emb[valid_indices]
-
-    # Convert embeddings to list format
-    img_emb_list = list(img_emb)
-    text_emb_list = list(text_emb)
-
-    # Ensure dimensions match (truncate if needed)
-    min_len = min(len(filtered_data), len(img_emb_list), len(text_emb_list))
-    filtered_data = filtered_data.iloc[:min_len]
-
-    # Convert embeddings to JSON strings
-    filtered_data["image_embedding"] = [json.dumps(emb.tolist()) for emb in img_emb[:min_len]]
-    filtered_data["text_embedding"] = [json.dumps(emb.tolist()) for emb in text_emb[:min_len]]
-
-    # Add overall entry ID
-    filtered_data.insert(0, "id", range(id_counter, id_counter + len(filtered_data)))
-    id_counter += len(filtered_data)  # Update global counter
-
-    # Keep only the required columns
-    print(f"Creating filtered dataset...")
-    final_data = filtered_data[["id", "original_caption", "cleaned_caption",
-                                "identified_occupations", "similarity", "image_embedding", "text_embedding"]]
-
-    # Append to global DataFrame
-    merged_data = pd.concat([merged_data, final_data], ignore_index=True)
-
-    print(f"Merged {len(final_data)} records from file {str_i}.")
+        return None, None, None  # Skip if the embedding files are missing
+        
+    # Load image and text embeddings
+    print(f"Filtering image and text embeddings...")
+    # Load embeddings using parallel processing
+    with Pool(cpu_count()) as pool:
+        # Load embeddings in parallel
+        img_emb = pool.map(load_img_emb, [(img_emb_file, valid_indices)])[0]
+        text_emb = pool.map(load_text_emb, [(text_emb_file, valid_indices)])[0]
     
-    # Cleanup intermediate files (optional)
-    os.remove(img_emb_file)
-    os.remove(text_emb_file)
+    # Add overall entry IDs
+    filtered_data.insert(0, "id", range(id_counter, id_counter + len(filtered_data)))
+    id_counter += len(filtered_data) # Update global counter
+    
+    # Select final columns for output
+    final_data = filtered_data[["id", "original_caption", "cleaned_caption", "identified_occupations", "similarity"]]
+    
+    return final_data, text_emb, img_emb
 
-    return merged_data
+def remove_batch(file_number):
+    """
+    Removes temporary batch files.
+    
+    Parameters:
+    file_number (int): Batch number to remove
+    
+    The function:
+    1. Removes temporary files for a given batch
+    """
+    print(f"Removing temporary files for batch {file_number}...")
+    try:
+        str_i = str(file_number)
+        for file in [f"metadata_{str_i}.parquet", f"img_emb_{str_i}.npy", f"text_emb_{str_i}.npy"]:
+            if os.path.exists(file):
+                try:
+                    os.remove(file)
+                except OSError as e:
+                    print(f"Error removing {file}: {e}")
+    except Exception as e:
+        print(f"Error in remove_batch: {e}")
+    str_i = str(file_number)
+    for file in [f"metadata_{str_i}.parquet", f"img_emb_{str_i}.npy", f"text_emb_{str_i}.npy"]:
+        if os.path.exists(file):
+            os.remove(file)
+
+def process_file(file_number, merged_metadata, merged_text_emb, merged_img_emb):
+    """
+    Main processing function that orchestrates the pipeline.
+
+    Parameters:
+    file_number (int): Current file number to process
+    merged_metadata (pandas.DataFrame): Accumulated metadata
+    merged_text_emb (numpy.ndarray): Accumulated text embeddings
+    merged_img_emb (numpy.ndarray): Accumulated image embeddings
+
+    Returns:
+    tuple: (merged_metadata, merged_text_emb, merged_img_emb) with updated data
+    """
+    # Download batch data
+    metadata, text_emb, img_emb = download_batch(file_number)
+    if metadata is None:
+        return merged_metadata, merged_text_emb, merged_img_emb, file_summary
+        
+    # Filter captions and embeddings
+    filtered_data, file_summary = filter_captions(metadata, str(file_number))
+    final_data, text_emb, img_emb = filter_embeddings(filtered_data, file_number)
+    
+    # Merge data with accumulated data
+    if final_data is not None:
+        merged_metadata = pd.concat([merged_metadata, final_data], ignore_index=True)
+        merged_text_emb = np.concatenate((merged_text_emb, text_emb), axis=0)
+        merged_img_emb = np.concatenate((merged_img_emb, img_emb), axis=0)
+
+        # Check if we've exceeded 1M entries
+        if len(merged_metadata) >= 1_000_000:
+            # Save the current batch and get the next file number
+            batch_file_number = save_batch(merged_metadata, merged_text_emb, merged_img_emb)
+            print(f"Saved file {batch_file_number - 1} with {len(merged_metadata)} records")
+            # Reset the merged data structures
+            merged_metadata = pd.DataFrame()
+            merged_text_emb = np.empty((0, 512))
+            merged_img_emb = np.empty((0, 512))
+    
+    # Remove temporary batch files
+    remove_batch(file_number)
+    return merged_metadata, merged_text_emb, merged_img_emb, file_summary
+
+def save_batch(metadata, text_emb, img_emb):
+    """
+    Saves a batch of data when it reaches 1M entries.
+    
+    Parameters:
+    metadata (pandas.DataFrame): Current metadata batch
+    text_emb (numpy.ndarray): Current text embeddings batch
+    img_emb (numpy.ndarray): Current image embeddings batch
+    
+    Returns:
+    int: Next file number to use
+    """
+    # Use global variable for file number tracking
+    global batch_file_number
+    if 'batch_file_number' not in globals():
+        batch_file_number = 0
+    next_num = batch_file_number
+    batch_file_number += 1
+    
+    # Save the current batch
+    metadata.to_csv(f"filtered_metadata_{next_num}.csv", index=False)
+    np.save(f"filtered_text_emb_{next_num}.npy", text_emb)
+    np.save(f"filtered_img_emb_{next_num}.npy", img_emb)
+
+    return batch_file_number
+
+def save_file(merged_metadata, merged_text_emb, merged_img_emb):
+    """
+    Saves any remaining data that didn't make it to a full 1M batch.
+
+    Parameters:
+    merged_metadata (pandas.DataFrame): Accumulated metadata
+    merged_text_emb (numpy.ndarray): Accumulated text embeddings
+    merged_img_emb (numpy.ndarray): Accumulated image embeddings
+
+    The function:
+    1. Saves the final merged dataset
+    2. Saves the file summary to a CSV file
+    """
+    global batch_file_number
+
+    if len(merged_metadata) > 0:
+        batch_file_number = save_batch(merged_metadata, merged_text_emb, merged_img_emb)
+    
+    # Save file summary to CSV
+    summary_df = pd.DataFrame.from_dict(file_summary, orient="index")
+    summary_df.to_csv("file_summary.csv", index=False)
+    total_entries = summary_df["occupation_related_entries"].sum()
+    
+    print(f"Processing complete with {batch_file_number} files and {total_entries} entries filtered.")
 
 # Main execution
 if __name__ == "__main__":
     if torch.device("mps"):
         print(f"Using device: {device}")
 
-    PROFESSIONS = load_professions()
-
-    merged_data = pd.DataFrame()  # Initialize an empty DataFrame for merging
-
     # Define the number of files (start from 1)
-    total_files = 2
+    total_files = 410
 
+    # Process each file
     for file_id in range(total_files):
         print(f"Processing batch {file_id}...")
-        merged_data = process_file(file_id, merged_data)
+        merged_metadata, merged_text_emb, merged_img_emb, file_summary = process_file(file_id, merged_metadata, merged_text_emb, merged_img_emb)
 
-    # Save final merged dataset
-    final_output_file = "merged_dataset.csv"
-    merged_data.to_csv(final_output_file, index=False)
-
-    # Save file summary to CSV
-    summary_df = pd.DataFrame.from_dict(file_summary, orient="index")
-    summary_df.to_csv("file_summary.csv", index=False)
-
-    print(f"Final merged dataset saved as {final_output_file} with {len(merged_data)} records.")
+    # Save the final merged dataset
+    save_file(merged_metadata, merged_text_emb, merged_img_emb)
