@@ -33,19 +33,29 @@ profession_df = profession_df.sort_values(by="Count", ascending=False)
 
 print(f"Total distinct professions identified: {len(total_profession_counts)}")
 
-# Display the top 30 professions
-print(profession_df.head(30))
+# Display the top 50 professions
+print(profession_df.head(50))
 
-# Plot: Top 30 most common professions
-plt.figure(figsize=(12, 6))
-plt.barh(profession_df["Profession"][:30], profession_df["Count"][:30])
-plt.xlabel("Number of Mentions")
-plt.ylabel("Profession")
-plt.title("Top 30 Most Frequent Professions in Dataset")
-plt.gca().invert_yaxis()  # Invert for better readability
-plt.tight_layout()  # Adjust layout to prevent label cutoff
-#plt.show()
+# Set up the figure
+fig, ax = plt.subplots(figsize=(10, 12))
+
+# Create horizontal bar chart using counts for bar lengths and color gray
+bars = ax.barh(profession_df["Profession"].head(50)[::-1], profession_df["Count"].head(50)[::-1], color="gray")
+
+# Customize labels and title
+ax.set_xlabel("Number of Mentions", fontsize=12)
+ax.set_ylabel("Profession", fontsize=12)
+ax.set_title("Top 50 Most Frequent Professions in Dataset", fontsize=14)
+for bar in bars:
+    ax.text(bar.get_width(), bar.get_y() + bar.get_height()/2, f"{int(bar.get_width())}", va="center", ha="left", fontsize=8)
+
+# Improve spacing by adjusting margins
+plt.subplots_adjust(left=0.3, right=0.95, top=0.95, bottom=0.05)
+
+plt.show()
 plt.savefig('top_professions.png', bbox_inches='tight', transparent=False, facecolor='white')
 
 # Save profession counts to CSV
 profession_df.to_csv('profession_counts.csv', index=False)
+
+
