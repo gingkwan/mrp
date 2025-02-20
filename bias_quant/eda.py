@@ -82,7 +82,7 @@ ax.legend(legend_labels, colors.keys(), loc="lower right")
 ax.tick_params(axis="y", labelsize=8)
 
 # Improve spacing by adjusting margins
-plt.subplots_adjust(left=0.3, right=0.95, top=0.95, bottom=0.05)
+plt.subplots_adjust(left=0.2, right=0.95, top=0.95, bottom=0.05)
 
 plt.savefig("bias_representation.png")
 plt.show()
@@ -102,7 +102,7 @@ combined_histogram_data = combined_histogram_data.dropna(subset=['text_bias'])
 
 # Plot histogram of the text_bias distribution
 plt.figure(figsize=(8, 6))
-plt.hist(combined_histogram_data['text_bias'], bins=20, color='skyblue', edgecolor='black')
+plt.hist(combined_histogram_data['text_bias'], bins=100, color='skyblue', edgecolor='black')
 plt.xlabel("Text Bias")
 plt.ylabel("Count")
 plt.title("Distribution of Text Bias")
