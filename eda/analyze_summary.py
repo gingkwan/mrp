@@ -50,10 +50,10 @@ for bar in bars:
     ax.text(bar.get_width(), bar.get_y() + bar.get_height()/2, f"{int(bar.get_width())}", va="center", ha="left", fontsize=8)
 
 # Improve spacing by adjusting margins
-plt.subplots_adjust(left=0.3, right=0.95, top=0.95, bottom=0.05)
+plt.subplots_adjust(left=0.2, right=0.95, top=0.95, bottom=0.05)
 
-plt.show()
 plt.savefig('top_professions.png', bbox_inches='tight', transparent=False, facecolor='white')
+plt.show()
 
 # Save profession counts to CSV
 profession_df.to_csv('profession_counts.csv', index=False)
